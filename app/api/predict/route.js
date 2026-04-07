@@ -1,4 +1,5 @@
 import Anthropic from '@anthropic-ai/sdk';
+import { ensureTable, savePrediction } from '@/lib/db';
 
 const MODEL = 'claude-sonnet-4-20250514';
 const MLB_BASE = 'https://statsapi.mlb.com/api/v1';
@@ -360,6 +361,29 @@ function buildMLBContext(
   ].join('\n');
 }
 
+// ── Verdict parser (server-side) ──────────────────────────────────────────────
+
+function parseVerdictServer(text) {
+  const attempts = [
+    () => text.trim(),
+    () => { const m = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/); return m?.[1] ?? null; },
+    () => { const m = text.match(/\{[\s\S]*\}/); return m?.[0] ?? null; },
+  ];
+  for (const attempt of attempts) {
+    try {
+      const src = attempt();
+      if (!src) continue;
+      const parsed = JSON.parse(src);
+      if (
+        typeof parsed.winner === 'string' &&
+        typeof parsed.confidence === 'number' &&
+        typeof parsed.predictedScore === 'string'
+      ) return parsed;
+    } catch { /* try next */ }
+  }
+  return null;
+}
+
 // ── Streaming helper ──────────────────────────────────────────────────────────
 
 async function runStage(client, send, stage, params) {
@@ -377,6 +401,7 @@ async function runStage(client, send, stage, params) {
 // ── Route handler ─────────────────────────────────────────────────────────────
 
 export async function POST(request) {
+  console.log('ENV CHECK:', { hasAnthropic: !!process.env.ANTHROPIC_API_KEY, hasCricapi: !!process.env.CRICAPI_KEY });
   const { team1Id, team1Name, team2Id, team2Name } = await request.json();
   const encoder = new TextEncoder();
 
@@ -550,7 +575,7 @@ export async function POST(request) {
 
         // ── Stage 4: Head Analyst ─────────────────────────────────────────────
         send({ type: 'stage_start', stage: 4, label: 'Head Analyst delivering the final verdict…' });
-        await runStage(client, send, 4, {
+        const stage4Text = await runStage(client, send, 4, {
           model: MODEL,
           max_tokens: 1500,
           system: `${groundTruthInstruction} You are the Head Analyst. Synthesise all three analyses into a definitive verdict. You MUST respond with ONLY a valid JSON object — no markdown fences, no preamble, no text outside the JSON:\n{"winner":"Team Name","confidence":70,"keyFactors":["factor 1","factor 2","factor 3"],"predictedScore":"4-2","summary":"One complete paragraph (2-4 sentences) that a baseball fan would enjoy. Must end with a full stop.","keyMatchups":[{"title":"Player A vs Pitcher B","detail":"Specific 2026 stats and why this matchup is decisive.","edge":"Team Name"},{"title":"Second key matchup","detail":"Specific stats and context.","edge":"Team Name"}]}`,
@@ -567,7 +592,32 @@ export async function POST(request) {
         });
         send({ type: 'stage_done', stage: 4 });
 
-        send({ type: 'done' });
+        // Save prediction to database
+        const verdict = parseVerdictServer(stage4Text);
+        if (verdict) {
+          const predId = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+          try {
+            await ensureTable();
+            await savePrediction({
+              id: predId,
+              team1: team1Name,
+              team2: team2Name,
+              team1Id,
+              team2Id,
+              predictedWinner: verdict.winner,
+              confidence: verdict.confidence,
+              predictedScore: verdict.predictedScore,
+              gameDate: nextH2HGame?.date ?? null,
+              gameId: nextH2HGame?.gamePk ?? null,
+            });
+            send({ type: 'done', predictionId: predId });
+          } catch (dbErr) {
+            console.error('DB save failed:', dbErr);
+            send({ type: 'done' });
+          }
+        } else {
+          send({ type: 'done' });
+        }
       } catch (err) {
         send({ type: 'error', message: err?.message ?? 'Unknown error' });
       }

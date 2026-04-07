@@ -68,19 +68,16 @@ type SavedPrediction = {
   checked?: boolean;
 };
 
-// ── localStorage helpers ──────────────────────────────────────────────────────
+// ── DB helpers ────────────────────────────────────────────────────────────────
 
-const STORAGE_KEY = 'formscout_predictions';
-
-function loadStoredPredictions(): SavedPrediction[] {
-  if (typeof window === 'undefined') return [];
-  try { return JSON.parse(localStorage.getItem(STORAGE_KEY) ?? '[]'); }
-  catch { return []; }
-}
-
-function persistPredictions(preds: SavedPrediction[]) {
-  if (typeof window === 'undefined') return;
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(preds));
+async function fetchPredictionsFromDB(): Promise<SavedPrediction[]> {
+  try {
+    const res = await fetch('/api/predictions');
+    const data = await res.json();
+    return data.predictions ?? [];
+  } catch {
+    return [];
+  }
 }
 
 // ── JSON parsing ──────────────────────────────────────────────────────────────
@@ -888,56 +885,9 @@ export default function Home() {
       .finally(() => setTeamsLoading(false));
   }, []);
 
-  // On mount: load saved predictions and check results for past games
+  // On mount: fetch predictions from the global database
   useEffect(() => {
-    const stored = loadStoredPredictions();
-    if (!stored.length) return;
-    setPredictions(stored);
-
-    const today = new Date().toISOString().split('T')[0];
-    const toCheck = stored.filter(
-      (p) => !p.checked && p.gameId && p.gameDate && p.gameDate <= today
-    );
-    if (!toCheck.length) return;
-
-    Promise.all(
-      toCheck.map(async (pred) => {
-        try {
-          const res = await fetch(
-            `https://statsapi.mlb.com/api/v1/schedule?gamePk=${pred.gameId}&hydrate=linescore`
-          );
-          const data = await res.json();
-          const game = data?.dates?.[0]?.games?.[0];
-          if (!game || game.status?.abstractGameState !== 'Final') return null;
-
-          const home = game.teams?.home;
-          const away = game.teams?.away;
-          const isTeam1Home = home?.team?.id === pred.team1Id;
-          const t1 = isTeam1Home ? home : away;
-          const t2 = isTeam1Home ? away : home;
-          const actualWinner = t1?.isWinner ? pred.team1Name : pred.team2Name;
-          const actualScore = `${home?.score ?? 0}-${away?.score ?? 0}`;
-          return {
-            id: pred.id,
-            actualWinner,
-            actualScore,
-            correct: actualWinner === pred.predictedWinner,
-            checked: true as const,
-          };
-        } catch { return null; }
-      })
-    ).then((results) => {
-      const updates = results.filter(Boolean) as {
-        id: string; actualWinner: string; actualScore: string; correct: boolean; checked: true;
-      }[];
-      if (!updates.length) return;
-      const updated = stored.map((p) => {
-        const u = updates.find((x) => x.id === p.id);
-        return u ? { ...p, ...u } : p;
-      });
-      persistPredictions(updated);
-      setPredictions(updated);
-    });
+    fetchPredictionsFromDB().then(setPredictions);
   }, []);
 
   const team1 = teams.find((t) => t.id === team1Id);
@@ -1005,32 +955,13 @@ export default function Home() {
               if (event.stage === 4) {
                 const raw = updated[3]?.text ?? '';
                 setVerdictRaw(raw);
-                const parsed = parseVerdict(raw);
-                setVerdict(parsed);
-                // Save prediction to localStorage
-                if (parsed) {
-                  const newPred: SavedPrediction = {
-                    id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-                    date: new Date().toISOString(),
-                    team1Id: t1.id,
-                    team2Id: t2.id,
-                    team1Name: t1.name,
-                    team2Name: t2.name,
-                    predictedWinner: parsed.winner,
-                    predictedScore: parsed.predictedScore,
-                    confidence: parsed.confidence,
-                    gameId: nextGameRef.current.id,
-                    gameDate: nextGameRef.current.date,
-                  };
-                  setPredictions((prev) => {
-                    const updated2 = [newPred, ...prev];
-                    persistPredictions(updated2);
-                    return updated2;
-                  });
-                }
+                setVerdict(parseVerdict(raw));
               }
               return updated;
             });
+          } else if (event.type === 'done') {
+            // Refresh from DB so the new prediction (saved server-side) appears
+            fetchPredictionsFromDB().then(setPredictions);
           } else if (event.type === 'error') {
             setError(event.message);
           }
