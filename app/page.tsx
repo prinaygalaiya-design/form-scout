@@ -685,12 +685,10 @@ function CircularAccuracy({ correct, total }: { correct: number; total: number }
 }
 
 function PredictionCard({ pred }: { pred: SavedPrediction }) {
-  const dateStr = new Date(pred.date).toLocaleDateString('en-US', {
-    month: 'short', day: 'numeric', year: 'numeric',
-  });
-
+  const today = new Date().toISOString().split('T')[0];
   const isPending = !pred.checked;
-  const hasFutureGame = pred.gameDate && pred.gameDate > new Date().toISOString().split('T')[0];
+  const isToday = pred.gameDate === today;
+  const isFuture = pred.gameDate != null && pred.gameDate > today;
 
   return (
     <div className="bg-slate-800/50 rounded-xl border border-slate-700/50 p-4">
@@ -703,7 +701,6 @@ function PredictionCard({ pred }: { pred: SavedPrediction }) {
             <TeamLogo teamId={pred.team2Id} size={24} />
           </div>
           <div className="min-w-0">
-            <p className="text-xs text-slate-500 mb-0.5">{dateStr}</p>
             <p className="text-sm font-bold text-white truncate">
               {pred.team1Name} vs {pred.team2Name}
             </p>
@@ -724,16 +721,17 @@ function PredictionCard({ pred }: { pred: SavedPrediction }) {
                 )}
               </p>
             )}
-            {isPending && !hasFutureGame && pred.gameId && (
-              <p className="text-[10px] text-slate-600 mt-1 italic">Checking result…</p>
+            {isPending && isToday && pred.gameId && (
+              <p className="text-[10px] text-amber-500/70 mt-1">Game is today — result pending</p>
             )}
-            {isPending && hasFutureGame && (
-              <p className="text-[10px] text-slate-600 mt-1">
-                Game scheduled {pred.gameDate}
-              </p>
+            {isPending && isFuture && (
+              <p className="text-[10px] text-slate-600 mt-1">Game scheduled {pred.gameDate}</p>
+            )}
+            {isPending && !isToday && !isFuture && pred.gameId && (
+              <p className="text-[10px] text-slate-600 mt-1 italic">Awaiting result check…</p>
             )}
             {!pred.gameId && (
-              <p className="text-[10px] text-slate-600 mt-1 italic">No upcoming game found</p>
+              <p className="text-[10px] text-slate-600 mt-1 italic">No game ID recorded</p>
             )}
           </div>
         </div>
@@ -759,23 +757,53 @@ function PredictionCard({ pred }: { pred: SavedPrediction }) {
 function PredictionHistorySection({ predictions }: { predictions: SavedPrediction[] }) {
   if (!predictions.length) return null;
 
+  const today = new Date().toISOString().split('T')[0];
+  const todayPreds = predictions.filter((p) => p.gameDate === today);
+  const olderPreds = predictions.filter((p) => p.gameDate !== today);
+
   const checked = predictions.filter((p) => p.checked);
   const correct = checked.filter((p) => p.correct).length;
+  const accuracyPct = checked.length > 0 ? Math.round((correct / checked.length) * 100) : null;
 
   return (
-    <div className="w-full max-w-2xl space-y-4">
-      {/* Section header */}
+    <div className="w-full max-w-2xl space-y-5">
+
+      {/* ── Global accuracy stat ── */}
       <div className="flex items-center justify-between">
         <div>
           <p className="text-[10px] font-bold tracking-[0.18em] uppercase text-slate-500">
-            Prediction History
+            Predictions
           </p>
-          <p className="text-xs text-slate-600 mt-0.5">{predictions.length} prediction{predictions.length !== 1 ? 's' : ''}</p>
+          <p className="text-sm font-bold text-white mt-0.5">
+            {predictions.length} prediction{predictions.length !== 1 ? 's' : ''} made
+            {accuracyPct !== null && (
+              <span className="text-cyan-400"> — {accuracyPct}% accuracy</span>
+            )}
+          </p>
         </div>
         <CircularAccuracy correct={correct} total={checked.length} />
       </div>
 
-      {/* Stats bar */}
+      {/* ── Today's Predictions ── */}
+      {todayPreds.length > 0 && (
+        <div className="space-y-2.5">
+          <div className="flex items-center gap-2">
+            <p className="text-[10px] font-bold tracking-[0.18em] uppercase text-slate-500">
+              Today's Predictions
+            </p>
+            <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-cyan-500/15 text-cyan-400 border border-cyan-500/20">
+              {todayPreds.length} game{todayPreds.length !== 1 ? 's' : ''}
+            </span>
+          </div>
+          <div className="space-y-2">
+            {todayPreds.map((pred) => (
+              <PredictionCard key={pred.id} pred={pred} />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* ── Stats bar (all-time) ── */}
       {checked.length > 0 && (
         <div className="flex gap-4 bg-slate-800/50 rounded-xl border border-slate-700/50 px-5 py-3">
           <div className="text-center">
@@ -795,19 +823,29 @@ function PredictionHistorySection({ predictions }: { predictions: SavedPredictio
           <div className="flex-1" />
           <div className="text-right self-center">
             <p className="text-sm font-black text-cyan-400">
-              {checked.length > 0 ? `${Math.round((correct / checked.length) * 100)}%` : '—'}
+              {`${Math.round((correct / checked.length) * 100)}%`}
             </p>
             <p className="text-[9px] text-slate-600 uppercase tracking-wider">accuracy</p>
           </div>
         </div>
       )}
 
-      {/* Cards */}
-      <div className="space-y-2.5">
-        {predictions.map((pred) => (
-          <PredictionCard key={pred.id} pred={pred} />
-        ))}
-      </div>
+      {/* ── Older predictions ── */}
+      {olderPreds.length > 0 && (
+        <div className="space-y-2.5">
+          {todayPreds.length > 0 && (
+            <p className="text-[10px] font-bold tracking-[0.18em] uppercase text-slate-500">
+              Previous Predictions
+            </p>
+          )}
+          <div className="space-y-2">
+            {olderPreds.map((pred) => (
+              <PredictionCard key={pred.id} pred={pred} />
+            ))}
+          </div>
+        </div>
+      )}
+
     </div>
   );
 }
