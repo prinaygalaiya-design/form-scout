@@ -16,7 +16,7 @@ export async function GET(request) {
       pending.map(async (pred) => {
         try {
           const res = await fetch(
-            `${MLB_BASE}/schedule?gamePk=${pred.gameId}&hydrate=linescore`
+            `${MLB_BASE}/schedule?gamePk=${pred.game_id}&hydrate=linescore`
           );
           const data = await res.json();
           const game = data?.dates?.[0]?.games?.[0];
@@ -24,16 +24,16 @@ export async function GET(request) {
 
           const home = game.teams?.home;
           const away = game.teams?.away;
-          const isTeam1Home = home?.team?.id === pred.team1Id;
+          const isTeam1Home = home?.team?.id === pred.team1_id;
           const t1 = isTeam1Home ? home : away;
           const actualWinner = t1?.isWinner ? pred.team1 : pred.team2;
           const actualScore = `${home?.score ?? 0}-${away?.score ?? 0}`;
-          const correct = actualWinner === pred.predictedWinner;
+          const correct = actualWinner === pred.predicted_winner;
 
           await updatePredictionResult(pred.id, actualWinner, actualScore, correct);
           updated++;
         } catch (err) {
-          console.error(`Failed to check game ${pred.gameId}:`, err);
+          console.error(`Failed to check game ${pred.game_id}:`, err);
         }
       })
     );
