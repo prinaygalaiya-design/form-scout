@@ -1,5 +1,5 @@
 import { predictGame } from '@/lib/predict-game';
-import { savePrediction, predictionExistsForGame } from '@/lib/db';
+import { ensureTable, savePrediction, predictionExistsForGame } from '@/lib/db';
 
 const MLB_BASE = 'https://statsapi.mlb.com/api/v1';
 
@@ -10,6 +10,8 @@ export async function GET(request) {
   if (authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
     return new Response('Unauthorized', { status: 401 });
   }
+
+  await ensureTable();
 
   const today = new Date().toISOString().split('T')[0];
 

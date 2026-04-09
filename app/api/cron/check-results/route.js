@@ -1,4 +1,4 @@
-import { fetchPendingPredictions, updatePredictionResult } from '@/lib/db';
+import { ensureTable, fetchPendingPredictions, updatePredictionResult } from '@/lib/db';
 
 const MLB_BASE = 'https://statsapi.mlb.com/api/v1';
 
@@ -9,6 +9,7 @@ export async function GET(request) {
   }
 
   try {
+    await ensureTable();
     const pending = await fetchPendingPredictions();
 
     let updated = 0;
