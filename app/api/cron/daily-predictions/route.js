@@ -3,7 +3,7 @@ import { ensureTable, savePrediction, predictionExistsForGame } from '@/lib/db';
 
 const MLB_BASE = 'https://statsapi.mlb.com/api/v1';
 
-export const maxDuration = 300;
+export const maxDuration = 60;
 
 export async function GET(request) {
   const authHeader = request.headers.get('authorization');
@@ -43,71 +43,71 @@ export async function GET(request) {
     return Response.json({ message: 'No games scheduled today', predicted: 0, skipped: 0 });
   }
 
-  // 2. Process each game sequentially to respect Anthropic rate limits
-  let predicted = 0;
+  // 2. Find the first game that doesn't have a prediction yet
+  let target = null;
   let skipped = 0;
-  const errors = [];
-
   for (const game of games) {
-    const label = `${game.homeTeamName} vs ${game.awayTeamName} (gamePk=${game.gamePk})`;
-
-    // Skip if prediction already exists
     try {
       const exists = await predictionExistsForGame(game.gamePk);
       if (exists) {
-        console.log(`[daily-predictions] Skipping ${label} — prediction already exists`);
         skipped++;
         continue;
       }
+      target = game;
+      break;
     } catch (err) {
-      console.error(`[daily-predictions] DB check failed for ${label}:`, err.stack ?? err.message);
-      errors.push({ gamePk: game.gamePk, step: 'db-exists-check', error: err.message });
-      continue;
-    }
-
-    console.log(`[daily-predictions] Starting prediction for ${label}`);
-
-    try {
-      const { verdict } = await predictGame({
-        team1Id: game.homeTeamId,
-        team1Name: game.homeTeamName,
-        team2Id: game.awayTeamId,
-        team2Name: game.awayTeamName,
-      });
-
-      if (!verdict) {
-        console.error(`[daily-predictions] Verdict parse failed for ${label}`);
-        errors.push({ gamePk: game.gamePk, step: 'verdict-parse', error: 'Claude response was not valid JSON' });
-        continue;
-      }
-
-      const predId = `cron-${game.gamePk}-${Date.now()}`;
-      await savePrediction({
-        id: predId,
-        team1: game.homeTeamName,
-        team2: game.awayTeamName,
-        team1Id: game.homeTeamId,
-        team2Id: game.awayTeamId,
-        predictedWinner: verdict.winner,
-        confidence: verdict.confidence,
-        predictedScore: verdict.predictedScore,
-        gameDate: game.gameDate,
-        gameId: game.gamePk,
-      });
-
-      predicted++;
-      console.log(`[daily-predictions] Done: ${label} → ${verdict.winner} wins (${verdict.confidence}%)`);
-    } catch (err) {
-      // err.step is set by predictGame's catch block — tells us exactly which
-      // phase of data fetching or which Claude stage threw.
-      const step = err.step ?? 'unknown';
-      console.error(`[daily-predictions] FAILED ${label} at step="${step}": ${err.message}`);
-      console.error(err.stack ?? '(no stack)');
-      errors.push({ gamePk: game.gamePk, step, error: err.message });
+      console.error(`[daily-predictions] DB check failed for gamePk=${game.gamePk}:`, err.stack ?? err.message);
+      return Response.json({ error: 'DB check failed', detail: err.message }, { status: 500 });
     }
   }
 
-  const summary = { date: today, totalGames: games.length, predicted, skipped, errors: errors.length ? errors : undefined };
-  console.log('[daily-predictions] Complete:', JSON.stringify(summary));
-  return Response.json(summary);
+  if (!target) {
+    console.log(`[daily-predictions] All ${games.length} game(s) already predicted for ${today}`);
+    return Response.json({ message: 'All games already predicted', date: today, totalGames: games.length, skipped });
+  }
+
+  // 3. Predict the one target game
+  const label = `${target.homeTeamName} vs ${target.awayTeamName} (gamePk=${target.gamePk})`;
+  console.log(`[daily-predictions] Predicting ${label}`);
+
+  try {
+    const { verdict } = await predictGame({
+      team1Id: target.homeTeamId,
+      team1Name: target.homeTeamName,
+      team2Id: target.awayTeamId,
+      team2Name: target.awayTeamName,
+    });
+
+    if (!verdict) {
+      console.error(`[daily-predictions] Verdict parse failed for ${label}`);
+      return Response.json({ error: 'Claude response was not valid JSON', gamePk: target.gamePk }, { status: 500 });
+    }
+
+    const predId = `cron-${target.gamePk}-${Date.now()}`;
+    await savePrediction({
+      id: predId,
+      team1: target.homeTeamName,
+      team2: target.awayTeamName,
+      team1Id: target.homeTeamId,
+      team2Id: target.awayTeamId,
+      predictedWinner: verdict.winner,
+      confidence: verdict.confidence,
+      predictedScore: verdict.predictedScore,
+      gameDate: target.gameDate,
+      gameId: target.gamePk,
+    });
+
+    console.log(`[daily-predictions] Done: ${label} → ${verdict.winner} wins (${verdict.confidence}%)`);
+    return Response.json({
+      date: today,
+      totalGames: games.length,
+      skipped,
+      predicted: { gamePk: target.gamePk, label, winner: verdict.winner, confidence: verdict.confidence },
+    });
+  } catch (err) {
+    const step = err.step ?? 'unknown';
+    console.error(`[daily-predictions] FAILED ${label} at step="${step}": ${err.message}`);
+    console.error(err.stack ?? '(no stack)');
+    return Response.json({ error: err.message, step, gamePk: target.gamePk }, { status: 500 });
+  }
 }
