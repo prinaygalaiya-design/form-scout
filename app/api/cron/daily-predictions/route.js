@@ -3,8 +3,6 @@ import { savePrediction, predictionExistsForGame } from '@/lib/db';
 
 const MLB_BASE = 'https://statsapi.mlb.com/api/v1';
 
-// Vercel Pro/Enterprise allows up to 300s; set max so the cron doesn't get
-// cut off mid-game while running predictions sequentially.
 export const maxDuration = 300;
 
 export async function GET(request) {
@@ -18,9 +16,12 @@ export async function GET(request) {
   // 1. Fetch today's MLB schedule
   let games;
   try {
-    const res = await fetch(
-      `${MLB_BASE}/schedule?sportId=1&date=${today}&gameType=R`
-    );
+    const scheduleUrl = `${MLB_BASE}/schedule?sportId=1&date=${today}&gameType=R`;
+    console.log(`[daily-predictions] Fetching schedule: ${scheduleUrl}`);
+    const res = await fetch(scheduleUrl);
+    if (!res.ok) {
+      throw new Error(`MLB schedule API ${res.status} ${res.statusText} — ${scheduleUrl}`);
+    }
     const data = await res.json();
     games = (data?.dates?.[0]?.games ?? []).map((g) => ({
       gamePk: g.gamePk,
@@ -30,9 +31,10 @@ export async function GET(request) {
       awayTeamId: g.teams?.away?.team?.id,
       awayTeamName: g.teams?.away?.team?.name,
     })).filter((g) => g.homeTeamId && g.awayTeamId);
+    console.log(`[daily-predictions] ${games.length} game(s) found for ${today}`);
   } catch (err) {
-    console.error('Failed to fetch today\'s schedule:', err);
-    return Response.json({ error: 'Failed to fetch MLB schedule' }, { status: 500 });
+    console.error('[daily-predictions] Failed to fetch schedule:', err.stack ?? err.message);
+    return Response.json({ error: 'Failed to fetch MLB schedule', detail: err.message }, { status: 500 });
   }
 
   if (!games.length) {
@@ -45,20 +47,24 @@ export async function GET(request) {
   const errors = [];
 
   for (const game of games) {
-    // Skip if we already have a prediction for this game
+    const label = `${game.homeTeamName} vs ${game.awayTeamName} (gamePk=${game.gamePk})`;
+
+    // Skip if prediction already exists
     try {
       const exists = await predictionExistsForGame(game.gamePk);
       if (exists) {
+        console.log(`[daily-predictions] Skipping ${label} — prediction already exists`);
         skipped++;
         continue;
       }
     } catch (err) {
-      console.error(`DB check failed for game ${game.gamePk}:`, err);
-      errors.push({ gamePk: game.gamePk, error: err?.message });
+      console.error(`[daily-predictions] DB check failed for ${label}:`, err.stack ?? err.message);
+      errors.push({ gamePk: game.gamePk, step: 'db-exists-check', error: err.message });
       continue;
     }
 
-    // Run the full 4-stage prediction (send is a no-op — no streaming needed)
+    console.log(`[daily-predictions] Starting prediction for ${label}`);
+
     try {
       const { verdict } = await predictGame({
         team1Id: game.homeTeamId,
@@ -68,7 +74,8 @@ export async function GET(request) {
       });
 
       if (!verdict) {
-        errors.push({ gamePk: game.gamePk, error: 'Verdict parse failed' });
+        console.error(`[daily-predictions] Verdict parse failed for ${label}`);
+        errors.push({ gamePk: game.gamePk, step: 'verdict-parse', error: 'Claude response was not valid JSON' });
         continue;
       }
 
@@ -87,18 +94,18 @@ export async function GET(request) {
       });
 
       predicted++;
-      console.log(`Predicted ${game.homeTeamName} vs ${game.awayTeamName}: ${verdict.winner} wins (${verdict.confidence}%)`);
+      console.log(`[daily-predictions] Done: ${label} → ${verdict.winner} wins (${verdict.confidence}%)`);
     } catch (err) {
-      console.error(`Prediction failed for game ${game.gamePk}:`, err);
-      errors.push({ gamePk: game.gamePk, error: err?.message });
+      // err.step is set by predictGame's catch block — tells us exactly which
+      // phase of data fetching or which Claude stage threw.
+      const step = err.step ?? 'unknown';
+      console.error(`[daily-predictions] FAILED ${label} at step="${step}": ${err.message}`);
+      console.error(err.stack ?? '(no stack)');
+      errors.push({ gamePk: game.gamePk, step, error: err.message });
     }
   }
 
-  return Response.json({
-    date: today,
-    totalGames: games.length,
-    predicted,
-    skipped,
-    errors: errors.length ? errors : undefined,
-  });
+  const summary = { date: today, totalGames: games.length, predicted, skipped, errors: errors.length ? errors : undefined };
+  console.log('[daily-predictions] Complete:', JSON.stringify(summary));
+  return Response.json(summary);
 }
